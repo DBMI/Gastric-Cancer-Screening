@@ -1,4 +1,15 @@
 /*
+** OMOP GASTRIC CANCER 09222026_adapted.sql
+** PI: Dr. Shailja Shah, MD, MPH , s6shah@health.ucsd.edu
+** Author: John McMichael, Associate Chief Medical Information Officer, Cleveland Clinic, McMichJ2@ccf.org
+** Adapted by: Kevin J. Delaney, kjdelaney@ucsd.edu
+** Database: OMOP
+*/
+USE [OMOP];
+
+/*** CONSTANTS ***/
+DECLARE @FIVE_YEARS_BEFORE AS INT	= -1826;
+/*
 	READ LAB CONCEPT IDs.
 */
 DROP TABLE IF EXISTS #LABS_LIST;
@@ -64,7 +75,7 @@ WITH PATIENT_GC_LIST AS
              GENDER_SOURCE_VALUE,
              race_source_value,
              ethnicity_source_value,
-			 c.state AS "STUDY STATE",
+			 c.state AS "STUDY_STATE",
              row_number() OVER (PARTITION BY a.Person_id
                                 ORDER BY condition_start_date ASC) AS rn
       FROM dbo.CONDITION_OCCURRENCE a
@@ -128,14 +139,14 @@ WITH CONTROLS AS
             a.visit_start_date,
             a.visit_source_value,
             b.specialty_source_value AS CONTROL_SPECIALTY,
-            c.BIRTH_DATETIME AS CONTROL_DOB,
+--            c.BIRTH_DATETIME AS CONTROL_DOB,
             RAND() AS Random1,
             row_number() OVER (PARTITION BY a.person_id
                                 ORDER BY a.visit_start_date ASC) AS rn3
         FROM dbo.VISIT_OCCURRENCE a
         INNER JOIN dbo.PROVIDER b ON a.provider_id = b.provider_id
         INNER JOIN dbo.PERSON c ON c.person_id = a.person_id
-        WHERE datediff(YEAR, c.BIRTH_DATETIME, a.visit_start_date) BETWEEN 40 AND 80
+        WHERE DATEDIFF(YEAR, c.BIRTH_DATETIME, a.visit_start_date) BETWEEN 40 AND 80
 		) x
 	)
 SELECT * INTO #GASTRIC_CA_STUDY_CONTROL
@@ -161,17 +172,19 @@ WITH GASTRIC_CA_COHORT1 AS
                   RAND() AS Random_Seed
            FROM #GASTRIC_CA_STUDY_CONTROL a
 		  ) x
-        WHERE rn4 = 1)y
-     WHERE rn5 <= 5)
+        WHERE rn4 = 1
+	) y
+    WHERE rn5 <= 5)
   SELECT * INTO #OMOP_COHORT
   FROM
     (SELECT STUDY_PAT_ID,
             PCP_DT_PRIOR_TO_DX,
-            GENDER_SOURCE_VALUE,
-            race_source_value,
-            ethnicity_source_value,
-            [STUDY STATE],
-            'STUDY' AS "Cohort",
+            GENDER_SOURCE_VALUE AS GENDER,
+            race_source_value AS RACE,
+            ethnicity_source_value AS ETHNICITY_SOURCE_VALUE,
+            STUDY_STATE,
+            'STUDY' AS "COHORT",
+			DATEDIFF(year, BIRTH_DATETIME, PCP_DT_PRIOR_TO_DX) AS "AGE_AT_DX_MINUS_1YR",
             row_number() OVER (PARTITION BY STUDY_PAT_ID
                                ORDER BY INITIAL_DX_DT ASC) AS rn
      FROM GASTRIC_CA_COHORT1
@@ -180,13 +193,14 @@ WITH GASTRIC_CA_COHORT1 AS
 	UNION
 
 	SELECT Study_person_id,
-		   visit_start_date,
-		   CONTROL_GENDER,
-		   CONTROL_RACE,
+		   visit_start_date AS PCP_DT_PRIOR_TO_DX,
+		   CONTROL_GENDER AS GENDER,
+		   CONTROL_RACE AS RACE,
 		   CONTROL_ETHNICITY,
 		   CONTROL_STATE,
-		   'CONTROL' AS "Cohort",
-		   '1'
+		   'CONTROL' AS "COHORT",
+			DATEDIFF(year, BIRTH_DATETIME, visit_start_date) AS "AGE_AT_DX_MINUS_1YR",
+		   '1' AS rn
 	FROM GASTRIC_CA_COHORT1;
 
 SELECT Cohort, COUNT(*) AS "Num in group" FROM #OMOP_COHORT GROUP BY Cohort ORDER BY Cohort;
@@ -194,6 +208,25 @@ SELECT Cohort, COUNT(*) AS "Num in group" FROM #OMOP_COHORT GROUP BY Cohort ORDE
 DROP TABLE #GASTRIC_CA_STUDY_CONTROL;
 CREATE NONCLUSTERED INDEX IX ON #OMOP_COHORT (STUDY_PAT_ID);
 SELECT COUNT(DISTINCT STUDY_PAT_ID) AS "Num patients in #OMOP_COHORT" FROM #OMOP_COHORT;
+/*****************************************************************/
+/************************** LAB HISTORY **************************/
+/*****************************************************************/
+
+SELECT 
+	a.study_pat_id AS STUDY_PAT_ID, 
+	b.measurement_date AS LAB_DT,
+	b.value_source_value AS LAB_VALUE, 
+	measurement_source_value AS MEASUREMENT_SOURCE_VALUE, 
+	measurement_source_concept_id AS MEASUREMENT_SOURCE_CONCEPT_ID,
+	measurement_concept_id AS MEASUREMENT_CONCEPT_ID,
+	ROW_NUMBER() OVER (PARTITION BY a.study_pat_id ORDER BY b.measurement_date DESC) AS rn
+FROM #OMOP_COHORT a 
+INNER JOIN measurement b 
+	ON a.study_pat_id = b.person_id
+   -- R code discards labs > 1826 days old.
+   AND b.measurement_date BETWEEN DATEADD(DAY, @FIVE_YEARS_BEFORE, PCP_DT_PRIOR_TO_DX) AND PCP_DT_PRIOR_TO_DX
+   AND b.value_source_value IS NOT NULL
+ ORDER BY study_pat_id, LAB_DT;
 /*****************************************************************/
 /************************** COMORBIDITIES ************************/
 /*****************************************************************/
@@ -209,11 +242,12 @@ WITH BMI AS
       FROM #OMOP_COHORT a
       INNER JOIN dbo.MEASUREMENT b 
 		ON a.study_pat_id = b.person_id
-	  INNER JOIN dbo.concept c
-		ON b.measurement_concept_id = c.concept_id
-		AND concept_name LIKE '%Body mass index%'
-		AND	(concept_class_id IN ('Clinical Observation', 'LOINC Component', 'LOINC Hierarchy')
-		     OR domain_id = 'Measurement')
+	   AND b.measurement_concept_id = 3038553
+--	  INNER JOIN dbo.concept c
+--		ON b.measurement_concept_id = c.concept_id
+--		AND concept_name LIKE '%Body mass index%'
+--		AND	(concept_class_id IN ('Clinical Observation', 'LOINC Component', 'LOINC Hierarchy')
+--		     OR domain_id = 'Measurement')
       WHERE
 			CAST(b.measurement_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)
         AND b.value_as_number IS NOT NULL
@@ -228,12 +262,9 @@ HEIGHT AS
              row_number() OVER (PARTITION BY a.study_pat_id
                                 ORDER BY b.measurement_date DESC) AS rn
       FROM #OMOP_COHORT a
-      INNER JOIN dbo.MEASUREMENT b ON a.study_pat_id = b.person_id
-	  INNER JOIN dbo.concept c
-		ON b.measurement_concept_id = c.concept_id
-		AND concept_name LIKE '%Height%'
-		AND	(concept_class_id IN ('Clinical Observation', 'LOINC Component', 'LOINC Hierarchy')
-		     OR domain_id = 'Measurement')
+      INNER JOIN dbo.MEASUREMENT b 
+		ON a.study_pat_id = b.person_id
+	   AND b.measurement_concept_id = 3036277
 	  WHERE 
 		  CAST(b.measurement_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)
         AND b.value_as_number IS NOT NULL) x
@@ -247,12 +278,9 @@ WEIGHT AS
              row_number() OVER (PARTITION BY a.study_pat_id
                                 ORDER BY b.measurement_date DESC) AS rn
       FROM #OMOP_COHORT a
-      INNER JOIN dbo.MEASUREMENT b ON a.study_pat_id = b.person_id
-	  INNER JOIN dbo.concept c
-		ON b.measurement_concept_id = c.concept_id
-		AND concept_name LIKE '%Weight%'
-		AND	(concept_class_id IN ('Clinical Observation', 'LOINC Component', 'LOINC Hierarchy')
-		     OR domain_id = 'Measurement')
+      INNER JOIN dbo.MEASUREMENT b
+		ON a.study_pat_id = b.person_id
+	   AND b.measurement_concept_id = 3025315
 	  WHERE 
 		  CAST(b.measurement_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)
         AND b.value_as_number IS NOT NULL) x
@@ -262,14 +290,15 @@ ALCOHOL AS
    FROM
      (SELECT a.study_pat_id,
              b.observation_date AS ALCOHOL_DT,
-             observation_source_value AS ALCOHOL,
+             value_as_string AS ALCOHOL,
              row_number() OVER (PARTITION BY a.study_pat_id
                                 ORDER BY b.observation_date DESC) AS rn
       FROM #OMOP_COHORT a
-      INNER JOIN dbo.OBSERVATION b ON a.study_pat_id = b.person_id
-      WHERE observation_source_value LIKE '%ALCOHOL%'
-        AND value_as_string = 'Yes'
-        AND CAST(b.observation_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)) x
+      INNER JOIN dbo.OBSERVATION b 
+		ON a.study_pat_id = b.person_id
+	   AND b.observation_concept_id IN (40771103, 40771104, 40771105)
+       AND CAST(b.observation_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)
+	) x
    WHERE rn = 1),
 TOBACCO AS
   (SELECT *
@@ -280,10 +309,17 @@ TOBACCO AS
              row_number() OVER (PARTITION BY a.study_pat_id
                                 ORDER BY b.observation_date DESC) AS rn
       FROM #OMOP_COHORT a
-      INNER JOIN dbo.OBSERVATION b ON a.study_pat_id = b.person_id
-      WHERE observation_source_value LIKE '%TOBACCO%'
-        AND value_as_string = 'Yes'
-        AND CAST(b.observation_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)) x
+      INNER JOIN dbo.OBSERVATION b 
+		ON a.study_pat_id = b.person_id
+	   AND b.observation_concept_id = 43054909
+	   AND b.observation_source_value IN 
+			('Former',
+			 'Every Day',
+			 'Some Days',
+			 'Light Smoker',
+			 'Heavy Smoker',
+			 'Smoker, Current Status Unknown')
+       AND CAST(b.observation_date AS DATE) <= CAST(PCP_DT_PRIOR_TO_DX AS DATE)) x
    WHERE rn = 1),
 FAM_HX_CA AS
   (SELECT *
@@ -522,6 +558,7 @@ SELECT
        HEIGHT,
        WEIGHT_DT,
        WEIGHT,
+	   703 * (WEIGHT/16)/SQUARE(HEIGHT) AS "BMI_CALCULATED",
        ALCOHOL_DT,
        ALCOHOL,
        TOBACCO_DT,
@@ -1765,12 +1802,181 @@ LEFT OUTER JOIN albumin y ON a.study_pat_id = y.study_pat_id;
 CREATE NONCLUSTERED INDEX IX ON #LABS (STUDY_PAT_ID);
 SELECT COUNT(DISTINCT STUDY_PAT_ID) AS "Num patients in #LABS" FROM #LABS;
 
-
-SELECT * 
+-- Only output the study id ONCE.
+SELECT 
+	cohort.*,
+	comor.BMI_DT,
+	comor.BMI,
+	comor.HEIGHT_DT,
+	comor.HEIGHT,
+	comor.WEIGHT_DT,
+	comor.WEIGHT,
+	comor.BMI_CALCULATED,
+	comor.ALCOHOL_DT,
+	comor.ALCOHOL,
+	comor.TOBACCO_DT,
+	comor.TOBACCO,
+	comor.FAM_HX_CA_DT,
+	comor.FAM_HX_CA,
+	comor.PERSONAL_HX_CA_ICD_DT,
+	comor.PERSONAL_HX_CA_ICD,
+	comor.Diabetes_DT AS DIABETES_DT,
+	comor.Diabetes AS DIABETES,
+	comor.Hypertension_DT AS HYPERTENSION_DT,
+	comor.Hypertension AS HYPERTENSION,
+	comor.Hypercholesterolemia_DT AS HYPERCHOLESTEROLEMIA_DT,
+	comor.Hypercholesterolemia AS HYPERCHOLESTEROLEMIA,
+	comor.Coronary_artery_disease_DT AS CORONARY_ARTERY_DISEASE_DT,
+	comor.Coronary_artery_disease AS CORONARY_ARTERY_DISEASE,
+	comor.Cirrhosis_DT AS CIRRHOSIS_DT,
+	comor.Cirrhosis AS CIRRHOSIS,
+	comor.Emphysema_DT AS EMPHYSEMA_DT,
+	comor.Emphysema AS EMPHYSEMA,
+	comor.Stroke_DT AS STROKE_DT,
+	comor.Stroke AS STROKE,
+	comor.Gastric_Ulcer_DT AS GASTRIC_ULCER_DT,
+	comor.Gastric_Ulcer AS GASTRIC_ULCER,
+	comor.Viral_hepatitis_DT AS VIRAL_HEPATITIS_DT,
+	comor.Viral_hepatitis AS VIRAL_HEPATITIS,
+	comor.Depression_DT AS DEPRESSION_DT,
+	comor.Depression AS DEPRESSION,
+	comor.IBD_DT,
+	comor.IBD,
+	comor.Chronic_respiratory_disease_DT AS CHRONIC_RESPIRATORY_DISEASE_DT,
+	comor.Chronic_respiratory_disease AS CHRONIC_RESPIRATORY_DISEASE,
+	comor.Chronic_renal_disease_DT AS CHRONIC_RENAL_DISEASE_DT,
+	comor.Chronic_renal_disease AS CHRONIC_RENAL_DISEASE,
+	comor.Upper_Gastrointestinal_Disease_DT AS UPPER_GASTROINTESTINAL_DISEASE_DT,
+	comor.Upper_Gastrointestinal_Disease AS UPPER_GASTROINTESTINAL_DISEASE,
+	comor.Lower_Gastrointestinal_Disease_DT AS LOWER_GASTROINTESTINAL_DISEASE_DT,
+	comor.Lower_Gastrointestinal_Disease AS LOWER_GASTROINTESTINAL_DISEASE,
+	diag.Gallstone_disorders_DT AS GALLSTONE_DISORDERS_DT,
+	diag.Gallstone_disorders AS GALLSTONE_DISORDERS,
+    diag.Hereditary_cancer_syndromes_DT AS HEREDITARY_CANCER_SYNDROMES_DT,
+    diag.Hereditary_cancer_syndromes AS HEREDITARY_CANCER_SYNDROMES,
+    diag.Peptic_ulcer_DT AS PEPTIC_ULCER_DT,
+    diag.Peptic_ulcer AS PEPTIC_ULCER,
+    diag.Deep_vein_thrombosis_DT AS DEEP_VEIN_THROMBOSIS_DT,
+    diag.Deep_vein_thrombosis AS DEEP_VEIN_THROMBOSIS,
+    diag.Pulmonary_Embolism_DT AS PULMONARY_EMBOLISM_DT,
+    diag.Pulmonary_Embolism AS PULMONARY_EMBOLISM,
+    diag.PERSONAL_HX_Gallstones_DT AS PERSONAL_HX_GALLSTONES_DT,
+    diag.PERSONAL_HX_Gallstones AS PERSONAL_HX_GALLSTONES,
+    diag.PERSONAL_HX_cholecystectomy_DT AS PERSONAL_HX_CHOLECYSTECTOMY_DT,
+    diag.PERSONAL_HX_cholecystectomy AS PERSONAL_HX_CHOLECYSTECTOMY,
+    diag.Vitamin_D_deficiency_DT AS VITAMIN_D_DEFICIENCY_DT,
+    diag.Vitamin_D_deficiency AS VITAMIN_D_DEFICIENCY,
+    diag.Pancreatic_Disorders_DT AS PANCREATIC_DISORDERS_DT,
+    diag.Pancreatic_Disorders AS PANCREATIC_DISORDERS,
+    diag.Chronic_pancreatitis_DT AS CHRONIC_PANCREATITIS_DT,
+    diag.Chronic_pancreatitis AS CHRONIC_PANCREATITIS,
+    diag.Acute_pancreatitis_DT AS ACUTE_PANCREATITIS_DT,
+    diag.Acute_pancreatitis AS ACUTE_PANCREATITIS,
+    diag.Pseudocyst_DT AS PSEUDOCYST_DT,
+    diag.Pseudocyst AS PSEUDOCYST,
+    diag.Biliary_tract_disease_DT AS BILIARY_TRACT_DISEASE_DT,
+    diag.Biliary_tract_disease AS BILIARY_TRACT_DISEASE,
+    diag.Abdominal_pain_DT AS ABDOMINAL_PAIN_DT,
+    diag.Abdominal_pain AS ABDOMINAL_PAIN,
+    diag.Jaundice_DT AS JAUNDICE_DT,
+    diag.Jaundice AS JAUNDICE,
+    diag.Dyspepsia_DT AS DYSPEPSIA_DT,
+    diag.Dyspepsia AS DYSPEPSIA,
+    diag.Nausea_and_vomiting_DT AS NAUSEA_AND_VOMITING_DT,
+    diag.Nausea_and_vomiting AS NAUSEA_AND_VOMITING,
+    diag.Weight_loss_DT AS WEIGHT_LOSS_DT,
+    diag.Weight_loss AS WEIGHT_LOSS,
+    diag.Back_pain_DT AS BACK_PAIN_DT,
+    diag.Back_pain AS BACK_PAIN,
+    diag.Constipation_DT AS CONSTIPATION_DT,
+    diag.Constipation AS CONSTIPATION,
+    diag.Diarrhea_DT AS DIARRHEA_DT,
+    diag.Diarrhea AS DIARRHEA,
+    diag.Malaise_fatigue_DT AS MALAISE_FATIGUE_DT,
+    diag.Malaise_fatigue AS MALAISE_FATIGUE,
+	labs.hgba1c_DT AS HGBA1C_DT,
+	labs.hgba1c_VALUE AS HGBA1C_VALUE,
+	labs.ALP_DT,
+	labs.ALP_VALUE,
+	labs.bilirubin_DT AS BILIRUBIN_DT,
+	labs.bilirubin_VALUE AS BILIRUBIN_VALUE,
+	labs.ALT_DT,
+	labs.ALT_VALUE,
+	labs.AST_DT,
+	labs.AST_VALUE,
+	labs.lipase_DT AS LIPASE_DT,
+	labs.lipase_VALUE AS LIPASE_VALUE,
+	labs.creatinine_DT AS CREATININE_DT,
+	labs.creatinine_VALUE AS CREATININE_VALUE,
+	labs.mcv_DT AS MCV_DT,
+	labs.mcv_VALUE AS MCV_VALUE,
+	labs.rdw_DT AS RDW_DT,
+	labs.rdw_VALUE AS RDW_VALUE,
+	labs.wbc_DT AS WBC_DT,
+	labs.wbc_VALUE AS WBC_VALUE,
+	labs.lymphocytes_DT AS LYMPHOCYTES_DT,
+	labs.lymphocytes_VALUE AS LYMPHOCYTES_VALUE,
+	labs.bun_DT AS BUN_DT,
+	labs.bun_VALUE AS BUN_VALUE,
+	labs.calcium_DT AS CALCIUM_DT,
+	labs.calcium_VALUE AS CALCIUM_VALUE,
+	labs.platelet_DT AS PLATELET_DT,
+	labs.platelet_VALUE AS PLATELET_VALUE,
+	labs.sodium_DT AS SODIUM_DT,
+	labs.sodium_VALUE AS SODIUM_VALUE,
+	labs.phosphorus_DT AS PHOSPHORUS_DT,
+	labs.phosphorus_VALUE AS PHOSPHORUS_VALUE,
+	labs.hdl_DT AS HDL_DT,
+	labs.hdl_VALUE AS HDL_VALUE,
+	labs.ldl_DT AS LDL_DT,
+	labs.ldl_VALUE AS LDL_VALUE,
+	labs.total_cholesterol_DT AS TOTAL_CHOLESTEROL_DT,
+	labs.total_cholesterol_VALUE AS TOTAL_CHOLESTEROL_VALUE,
+	labs.triglycerides_DT AS TRIGLYCERIDES_DT,
+	labs.triglycerides_VALUE AS TRIGLYCERIDES_VALUE,
+	labs.glucose_DT AS GLUCOSE_DT,
+	labs.glucose_VALUE AS GLUCOSE_VALUE,
+	labs.hematocrit_DT AS HEMATOCRIT_DT,
+	labs.hematocrit_VALUE AS HEMATOCRIT_VALUE,
+	labs.hemoglobin_DT AS HEMOGLOBIN_DT,
+	labs.hemoglobin_VALUE AS HEMOGLOBIN_VALUE,
+	labs.albumin_DT AS ALBUMIN_DT,
+	labs.albumin_VALUE AS ALBUMIN_VALUE,
+	meds.Metformin_DT AS METFORMIN_DT,
+	meds.Metformin AS METFORMIN,
+	meds.Insulin_DT AS INSULIN_DT,
+	meds.Insulin AS INSULIN,
+	meds.Aspirin_DT AS ASPIRIN_DT,
+	meds.Aspirin AS ASPIRIN,
+	meds.NSAID_DT,
+	meds.NSAID,
+	meds.Beta_Blocker_DT AS BETA_BLOCKER_DT,
+	meds.Beta_Blocker AS BETA_BLOCKER,
+	meds.Statin_DT AS STATIN_DT,
+	meds.Statin AS STATIN,
+	meds.PPI_DT,
+	meds.PPI,
+	meds.Sulfonylurea_DT AS SULFONYLUREA_DT,
+	meds.Sulfonylurea AS SULFONYLUREA,
+	meds.Diuretics_DT AS DIURETICS_DT,
+	meds.Diuretics AS DIURETICS,
+	meds.Antipsychotics_DT AS ANTIPSYCHOTICS_DT,
+	meds.Antipsychotics AS ANTIPSYCHOTICS,
+	meds.Hormone_DT AS HORMONE_DT,
+	meds.Hormone AS HORMONE
 FROM #OMOP_COHORT cohort
 LEFT JOIN #COMORBIDITIES comor
 	ON cohort.STUDY_PAT_ID = comor.STUDY_PAT_ID
+LEFT JOIN #DIAGNOSES diag
+	ON cohort.STUDY_PAT_ID = diag.STUDY_PAT_ID
 LEFT JOIN #LABS labs
 	ON cohort.STUDY_PAT_ID = labs.STUDY_PAT_ID
 LEFT JOIN #MEDICATIONS meds
 	ON cohort.STUDY_PAT_ID = meds.STUDY_PAT_ID;
+
+/*
+SELECT COUNT(*) AS "BMI present" FROM #COMORBIDITIES WHERE BMI IS NOT NULL;
+SELECT COUNT(*) AS "Num rows" FROM #COMORBIDITIES;
+SELECT COUNT(*) FROM #COMORBIDITIES WHERE BMI IS NULL AND WEIGHT IS NOT NULL;
+SELECT COUNT(*) FROM #COMORBIDITIES WHERE Cirrhosis IS NOT NULL;
+*/
