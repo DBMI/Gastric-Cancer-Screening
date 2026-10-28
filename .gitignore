@@ -29,3 +29,12 @@ obj/
 *.bak
 *.log
 
+# Data files
+data/
+
+# R internals
+R Code/Gastric Cancer Screening/
+
+# Results directory & files
+results/
+*.csv

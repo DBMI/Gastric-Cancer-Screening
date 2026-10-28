@@ -1,0 +1,40 @@
+/*
+	READ MEDICATION CONCEPT IDs.
+*/
+DROP TABLE IF EXISTS #MEDICATIONS_LIST;
+CREATE TABLE #MEDICATIONS_LIST
+	(ROUTE_CONCEPT_ID varchar(12),
+	 DRUG_CONCEPT_ID varchar(12),
+	 DRUG_CLASS varchar(20))
+:setvar path "E:\DBMI Research\Gastric-Cancer-Screening\data\"
+:r $(path)\OMOP_MEDICATIONS_list.sql
+
+CREATE NONCLUSTERED INDEX IX ON #MEDICATIONS_LIST (DRUG_CONCEPT_ID);
+SELECT COUNT(DISTINCT DRUG_CONCEPT_ID) AS "Num medication concept IDs imported" FROM #MEDICATIONS_LIST;
+
+-- Augment with the "official" lab concept name.
+DROP TABLE IF EXISTS #MEDICATIONS_LIST_AUGMENTED;
+SELECT
+	ml.ROUTE_CONCEPT_ID,
+	ml.DRUG_CONCEPT_ID,
+	ml.DRUG_CLASS,
+	c.concept_name
+INTO #MEDICATIONS_LIST_AUGMENTED
+FROM #MEDICATIONS_LIST ml
+JOIN concept c
+	ON ml.DRUG_CONCEPT_ID = c.concept_id;
+
+CREATE NONCLUSTERED INDEX IX ON #MEDICATIONS_LIST_AUGMENTED (DRUG_CONCEPT_ID);
+
+SELECT * FROM #MEDICATIONS_LIST_AUGMENTED WHERE DRUG_CLASS = 'Hormone';
+
+SELECT TOP 100
+	a.person_id,
+    mli.concept_name AS Hormone,
+    a.drug_exposure_start_date AS Hormone_DT
+FROM dbo.DRUG_EXPOSURE a
+INNER JOIN #MEDICATIONS_LIST_AUGMENTED mli
+	ON a.drug_concept_id = mli.DRUG_CONCEPT_ID
+   AND mli.DRUG_CLASS = 'Hormone'
+--WHERE
+--	a.route_source_value LIKE 'Oral%';

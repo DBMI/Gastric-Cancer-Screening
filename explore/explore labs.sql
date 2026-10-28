@@ -1,0 +1,28 @@
+/*
+	READ LAB CONCEPT IDs.
+*/
+DROP TABLE IF EXISTS #LAB_CONCEPT_IDS;
+CREATE TABLE #LAB_CONCEPT_IDS
+	(CONCEPT_ID varchar(12),
+	 LAB_NAME varchar(100))
+:setvar path "E:\DBMI Research\Gastric-Cancer-Screening\data\"
+:r $(path)\lab_codes_list.sql
+
+CREATE NONCLUSTERED INDEX IX ON #LAB_CONCEPT_IDS (CONCEPT_ID);
+SELECT COUNT(DISTINCT CONCEPT_ID) AS "Num lab concept IDs imported" FROM #LAB_CONCEPT_IDS;
+
+-- Augment with the "official" lab concept name.
+DROP TABLE IF EXISTS #LAB_CONCEPT_IDS_AUGMENTED;
+SELECT
+	lci.CONCEPT_ID,
+	lci.LAB_NAME,
+	c.concept_name,
+	c.concept_code,
+	c.vocabulary_id
+INTO #LAB_CONCEPT_IDS_AUGMENTED
+FROM #LAB_CONCEPT_IDS lci
+JOIN concept c
+	ON lci.CONCEPT_ID = c.concept_id;
+
+CREATE NONCLUSTERED INDEX IX ON #LAB_CONCEPT_IDS_AUGMENTED (CONCEPT_ID);
+SELECT * FROM #LAB_CONCEPT_IDS_AUGMENTED ORDER BY LAB_NAME;
